@@ -1,57 +1,22 @@
-import json
-import re
+from pydantic import BaseModel, Field
 
 from llm.model import model
 from graph.state import State
 
 
-def _parse_json_response(content):
-    """
-    Convert an LLM response containing JSON text into a Python dictionary.
 
-    Handles:
-    - Normal JSON strings
-    - JSON wrapped in ```json ... ```
-    - Extra text before/after the JSON object
-    - Already-parsed dictionaries
-    """
+class SkillExtraction(BaseModel):
+    resume_skills: list[str] = Field(default_factory=list)
+    required_skills: list[str] = Field(default_factory=list)
 
-    if isinstance(content, dict):
-        return content
 
-    if not isinstance(content, str):
-        raise TypeError("LLM response content must be a string or dictionary.")
+class SkillComparison(BaseModel):
+    matching_skills: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
 
-    content = content.strip()
 
-    # Remove markdown code fences if present.
-    content = re.sub(r"^```json\s*", "", content, flags=re.IGNORECASE)
-    content = re.sub(r"^```\s*", "", content)
-    content = re.sub(r"\s*```$", "", content)
 
-    content = content.strip()
-
-    # First attempt: parse the complete response.
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-
-    # Second attempt: extract the first JSON object from the response.
-    start = content.find("{")
-    end = content.rfind("}")
-
-    if start == -1 or end == -1 or start >= end:
-        raise ValueError("Could not find a valid JSON object in the LLM response.")
-
-    json_text = content[start : end + 1]
-
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"LLM returned invalid JSON.\nResponse:\n{content}"
-        ) from e
+# Node 1: Extract resume and job skills
 
 
 def resume_required_skill_node(state: State):
@@ -62,10 +27,10 @@ You are a skill differentiation assistant.
 
 Analyze the candidate's resume and the job description.
 
-Resume content:
+Resume:
 {state["resume_text"]}
 
-Job description:
+Job Description:
 {state["job_description"]}
 
 Identify:
@@ -74,33 +39,27 @@ Identify:
 2. Skills required by the job description.
 
 Normalize similar skill names where appropriate.
-
-Return ONLY valid JSON.
-
-Required format:
-{{
-    "resume_skills": ["skill1", "skill2"],
-    "required_skills": ["skill1", "skill2"]
-}}
+Do not invent skills that are not present.
 """
 
-    response = model.invoke(prompt)
+    structured_model = model.with_structured_output(SkillExtraction)
 
-    result = _parse_json_response(response.content)
+    result = structured_model.invoke(prompt)
 
     return {
-        "resume_skills": result.get("resume_skills", []),
-        "required_skills": result.get("required_skills", []),
+        "resume_skills": result.resume_skills,
+        "required_skills": result.required_skills,
     }
 
 
+
+# Node 2: Find matching and missing skills
+
 def find_skills_node(state: State):
-    """Find matching and missing skills."""
+    """Compare resume skills with required job skills."""
 
     prompt = f"""
 You are a skill-matching assistant.
-
-Compare the candidate's skills with the skills required for the job.
 
 Candidate skills:
 {state["resume_skills"]}
@@ -110,37 +69,33 @@ Required job skills:
 
 Tasks:
 
-1. Identify the skills that appear in both lists or are clearly equivalent.
-2. Identify the required skills that are missing from the candidate's skills.
+1. Find skills that match or are clearly equivalent.
+2. Find required skills that are missing from the candidate's skills.
 
 Normalize equivalent skill names where appropriate.
-
-Return ONLY valid JSON.
-
-Required format:
-{{
-    "matching_skills": ["skill1", "skill2"],
-    "missing_skills": ["skill1", "skill2"]
-}}
+Do not invent skills.
 """
 
-    response = model.invoke(prompt)
+    structured_model = model.with_structured_output(SkillComparison)
 
-    result = _parse_json_response(response.content)
+    result = structured_model.invoke(prompt)
 
     return {
-        "matching_skills": result.get("matching_skills", []),
-        "missing_skills": result.get("missing_skills", []),
+        "matching_skills": result.matching_skills,
+        "missing_skills": result.missing_skills,
     }
 
 
+# Node 3: Generate suggestions
+
+
 def suggestion_node(state: State):
-    """Generate suggestions for improving the candidate's chances."""
+    """Generate practical suggestions based on skill gaps."""
 
     prompt = f"""
 You are a career suggestion assistant.
 
-Analyze the candidate's skills against the required skills for the job.
+Analyze the candidate's skills against the job requirements.
 
 Candidate skills:
 {state["resume_skills"]}
@@ -154,42 +109,37 @@ Matching skills:
 Missing skills:
 {state["missing_skills"]}
 
-Provide practical and specific suggestions based on the skill gaps.
+Provide practical and specific suggestions.
 
 Include:
 
 - What the candidate should improve.
 - What skills the candidate should learn or strengthen.
-- What projects or practical work could improve their chances.
-- What the candidate should improve on their resume.
+- What projects could improve their chances.
+- What should be improved on the resume.
 - An estimated ATS compatibility score out of 100 based only on the available skill information.
 
 Do not invent experience or qualifications.
 
-Return the suggestions as plain text.
+Return the answer as plain text.
 """
 
     response = model.invoke(prompt)
 
-    result = response.content
-
-    if isinstance(result, str):
-        result = result.strip()
-    else:
-        result = str(result).strip()
-
     return {
-        "suggestions": result
+        "suggestions": response.content.strip()
     }
 
 
+# Node 4: Generate final report
+
 def final_output_node(state: State):
-    """Generate the final professional report for the user."""
+    """Generate the final professional resume analysis report."""
 
     prompt = f"""
 You are a professional resume and career analysis assistant.
 
-Create the final report using the information below.
+Create a final report using the information below.
 
 Resume skills:
 {state["resume_skills"]}
@@ -210,28 +160,22 @@ Create a clear, professional, and easy-to-understand report.
 
 Requirements:
 
-- Include the important matching skills.
-- Include the important missing skills.
-- Include the ATS score if it is available in the suggestions.
-- Include all useful suggestions.
+- Include important matching skills.
+- Include important missing skills.
+- Include the ATS score if available in the suggestions.
+- Include useful suggestions.
 - Clearly explain the candidate's strengths.
 - Clearly explain the candidate's skill gaps.
 - Provide practical improvement advice.
 - Add a separate heading called "Expert Advice".
 - Do not invent candidate information.
-- Do not remove important information.
 - Keep the report focused on the specific job.
+
+Return the report as plain text.
 """
 
     response = model.invoke(prompt)
 
-    result = response.content
-
-    if isinstance(result, str):
-        result = result.strip()
-    else:
-        result = str(result).strip()
-
     return {
-        "final_report": result
+        "final_report": response.content.strip()
     }
