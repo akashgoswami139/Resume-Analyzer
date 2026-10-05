@@ -1,0 +1,16 @@
+# requirements.txt — Project Dependencies
+#
+# This file will contain all the Python packages required to run
+# the Resume Analyzer application.
+#
+# Add dependencies here as they are identified during development,
+# for example: streamlit, langgraph, langchain, python-dotenv,
+# PDF/DOCX parsing libraries, LLM provider SDKs, etc.
+#
+# Install with:  pip install -r requirements.txt
+streamlit
+langgraph
+langchain-core
+langchain-groq
+unstructured[pdf,docx]
+python-dotenv
